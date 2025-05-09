@@ -93,4 +93,4 @@ def get_excel_file_from_onedrive(access_token, file_name):
         return None
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
