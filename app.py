@@ -3,6 +3,8 @@ import openpyxl
 import msal
 import requests
 from flask import Flask, redirect, render_template, request, session, url_for
+from io import BytesIO  # <-- missing import
+
 from config import CLIENT_ID, CLIENT_SECRET, AUTHORITY, REDIRECT_URI, SCOPE
 
 app = Flask(__name__)
@@ -12,15 +14,18 @@ app.secret_key = os.urandom(24)
 def _build_msal_app(cache=None, authority=None):
     """Builds and returns the MSAL ConfidentialClientApplication."""
     return msal.ConfidentialClientApplication(
-        CLIENT_ID, authority=authority or AUTHORITY,
-        client_credential=CLIENT_SECRET, token_cache=cache)
+        CLIENT_ID,
+        authority=authority or AUTHORITY,
+        client_credential=CLIENT_SECRET,
+        token_cache=cache,
+    )
 
 
 def _build_auth_code_flow(scopes=None, redirect_uri=None):
     """Initiates the auth code flow for the given scopes and redirect URI."""
     return _build_msal_app().initiate_auth_code_flow(
-        scopes or [],
-        redirect_uri=redirect_uri or REDIRECT_URI)
+        scopes or [], redirect_uri=redirect_uri or REDIRECT_URI
+    )
 
 
 @app.route("/")
@@ -44,14 +49,14 @@ def authorized():
     try:
         cache = msal.SerializableTokenCache()
         result = _build_msal_app(cache=cache).acquire_token_by_auth_code_flow(
-            session.get("flow", {}), request.args)
+            session.get("flow", {}), request.args
+        )
     except ValueError:
         return "Authentication failed. Invalid response.", 400
 
     if "error" in result:
         return f"Error: {result['error']} - {result.get('error_description')}", 400
 
-    # Store user and token information in session
     session["user"] = result.get("id_token_claims")
     session["access_token"] = result.get("access_token")
     return redirect(url_for("lessons"))
@@ -66,20 +71,22 @@ def lessons():
     token = session["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
     file_url = "https://graph.microsoft.com/v1.0/me/drive/root:/LessonTracker.xlsx:/content"
-    
-    # Attempt to fetch the file content
+
     response = requests.get(file_url, headers=headers)
 
     if response.status_code != 200:
         return f"Failed to download Excel file: {response.text}", 400
 
-    # Load Excel content directly from response
+    # Load Excel file from response
     workbook = openpyxl.load_workbook(filename=BytesIO(response.content))
     sheet = workbook["lesson log"]
+
+    # Extract lessons starting from row 2 (skip headers)
     lessons = [
-        [cell.value for cell in row]
+        [cell for cell in row]
         for row in sheet.iter_rows(min_row=2, values_only=True)
     ]
+
     return render_template("lessons.html", lessons=lessons)
 
 
