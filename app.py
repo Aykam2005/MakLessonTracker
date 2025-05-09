@@ -3,7 +3,7 @@ import openpyxl
 import msal
 import requests
 from flask import Flask, redirect, render_template, request, session, url_for
-from io import BytesIO  # <-- missing import
+from io import BytesIO  # Required to read Excel file from memory
 
 from config import CLIENT_ID, CLIENT_SECRET, AUTHORITY, REDIRECT_URI, SCOPE
 
@@ -46,8 +46,9 @@ def login():
 @app.route("/callback")
 def authorized():
     """Handles the callback after successful authentication."""
+    cache = msal.SerializableTokenCache()
+
     try:
-        cache = msal.SerializableTokenCache()
         result = _build_msal_app(cache=cache).acquire_token_by_auth_code_flow(
             session.get("flow", {}), request.args
         )
@@ -57,6 +58,7 @@ def authorized():
     if "error" in result:
         return f"Error: {result['error']} - {result.get('error_description')}", 400
 
+    # Save user and access token in session
     session["user"] = result.get("id_token_claims")
     session["access_token"] = result.get("access_token")
     return redirect(url_for("lessons"))
@@ -64,7 +66,7 @@ def authorized():
 
 @app.route("/lessons")
 def lessons():
-    """Fetches and displays lessons from the Excel file."""
+    """Fetches and displays lessons from the Excel file stored in OneDrive."""
     if "access_token" not in session:
         return redirect(url_for("login"))
 
@@ -77,14 +79,18 @@ def lessons():
     if response.status_code != 200:
         return f"Failed to download Excel file: {response.text}", 400
 
-    # Load Excel file from response
-    workbook = openpyxl.load_workbook(filename=BytesIO(response.content))
-    sheet = workbook["lesson log"]
+    # Load workbook from response content
+    try:
+        workbook = openpyxl.load_workbook(filename=BytesIO(response.content))
+        sheet = workbook["lesson log"]
+    except Exception as e:
+        return f"Error reading Excel file: {e}", 500
 
-    # Extract lessons starting from row 2 (skip headers)
+    # Extract lessons starting from row 2 (skipping headers)
     lessons = [
-        [cell for cell in row]
+        list(row)
         for row in sheet.iter_rows(min_row=2, values_only=True)
+        if any(row)  # skip completely empty rows
     ]
 
     return render_template("lessons.html", lessons=lessons)
@@ -92,7 +98,7 @@ def lessons():
 
 @app.route("/logout")
 def logout():
-    """Logs the user out by clearing the session and redirecting."""
+    """Logs the user out by clearing the session and redirecting to Microsoft logout."""
     session.clear()
     return redirect(
         f"{AUTHORITY}/oauth2/v2.0/logout?post_logout_redirect_uri={url_for('index', _external=True)}"
