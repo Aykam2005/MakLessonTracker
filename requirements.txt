@@ -4,5 +4,4 @@ msal
 requests
 openpyxl
 python-dotenv
-pip install gunicorn
 gunicorn
