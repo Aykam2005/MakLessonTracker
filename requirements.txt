@@ -1,0 +1,6 @@
+
+Flask
+msal
+requests
+openpyxl
+python-dotenv
