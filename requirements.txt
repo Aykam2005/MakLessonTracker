@@ -1,7 +1,5 @@
-
-Flask
+flask
 msal
 requests
 openpyxl
-python-dotenv
 gunicorn
