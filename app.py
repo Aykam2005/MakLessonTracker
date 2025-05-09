@@ -1,96 +1,88 @@
-from flask import Flask, session, redirect, url_for, request, render_template
+import os
+import openpyxl
 import msal
 import requests
-from openpyxl import load_workbook
-import os
-from config import CLIENT_ID, CLIENT_SECRET, TENANT_ID, AUTHORITY, REDIRECT_URI, SCOPE
+from flask import Flask, redirect, render_template, request, session, url_for
+from config import CLIENT_ID, CLIENT_SECRET, AUTHORITY, REDIRECT_URI, SCOPE
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-def _build_msal_app():
-    """Build MSAL confidential client app."""
-    return msal.ConfidentialClientApplication(
-        CLIENT_ID, authority=AUTHORITY,
-        client_credential=CLIENT_SECRET
-    )
 
-def _build_auth_code_flow():
-    """Initiate the auth code flow."""
+def _build_msal_app(cache=None, authority=None):
+    return msal.ConfidentialClientApplication(
+        CLIENT_ID, authority=authority or AUTHORITY,
+        client_credential=CLIENT_SECRET, token_cache=cache)
+
+
+def _build_auth_code_flow(scopes=None, redirect_uri=None):
     return _build_msal_app().initiate_auth_code_flow(
-        scopes=SCOPE,
-        redirect_uri=REDIRECT_URI
-    )
+        scopes or [],
+        redirect_uri=redirect_uri or REDIRECT_URI)
+
 
 @app.route("/")
 def index():
-    """Main page after login."""
-    if "token" not in session:
+    if not session.get("user"):
         return redirect(url_for("login"))
-    return render_template("index.html")
+    return redirect(url_for("lessons"))
+
 
 @app.route("/login")
 def login():
-    """Login route: redirects user to Microsoft login page."""
-    session["flow"] = _build_auth_code_flow()
+    session["flow"] = _build_auth_code_flow(scopes=SCOPE, redirect_uri=REDIRECT_URI)
     return redirect(session["flow"]["auth_uri"])
 
+
 @app.route("/callback")
-def callback():
-    """Callback URL after authentication with MS."""
-    flow = session.get("flow", {})
-    
-    # Check if authorization code is provided by Microsoft
-    if "code" not in request.args:
-        return "Missing 'code' parameter in callback", 400
-    
-    # Get the access token using the authorization code
-    result = _build_msal_app().acquire_token_by_authorization_code(
-        request.args["code"],
-        scopes=SCOPE,
-        redirect_uri=REDIRECT_URI
-    )
-    
-    if "access_token" in result:
-        session["token"] = result["access_token"]
-        return redirect(url_for("index"))
-    
-    return f"Login failed: {result.get('error_description')}", 500
+def authorized():
+    try:
+        cache = msal.SerializableTokenCache()
+        result = _build_msal_app(cache=cache).acquire_token_by_auth_code_flow(
+            session.get("flow", {}), request.args)
+    except ValueError:
+        return "Authentication failed.", 400
 
-@app.route("/read_excel")
-def read_excel():
-    """Route to read Excel file from OneDrive."""
-    if "token" not in session:
+    if "error" in result:
+        return f"Error: {result['error']} - {result.get('error_description')}", 400
+
+    session["user"] = result.get("id_token_claims")
+    session["access_token"] = result["access_token"]
+    return redirect(url_for("lessons"))
+
+
+@app.route("/lessons")
+def lessons():
+    if "access_token" not in session:
         return redirect(url_for("login"))
-    
-    file_path = get_excel_file_from_onedrive(session["token"], "LessonTracker.xlsm")
-    
-    if file_path:
-        try:
-            wb = load_workbook(file_path, keep_vba=True)
-            sheet = wb["lesson log"]
-            last_row = sheet.max_row
-            last_entry = [cell.value for cell in sheet[last_row]]
-            return f"Last lesson entry: {last_entry}"
-        except Exception as e:
-            return f"Failed to read Excel file: {str(e)}", 500
-    return "Failed to load Excel file.", 500
 
-def get_excel_file_from_onedrive(access_token, file_name):
-    """Get Excel file from OneDrive."""
-    headers = {'Authorization': f'Bearer {access_token}'}
-    url = f'https://graph.microsoft.com/v1.0/me/drive/root:/{file_name}:/content'
+    token = session["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    file_url = "https://graph.microsoft.com/v1.0/me/drive/root:/LessonTracker.xlsx:/content"
+    response = requests.get(file_url, headers=headers)
 
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code == 200:
-        local_file = f"temp_{file_name}"
-        with open(local_file, 'wb') as f:
-            f.write(response.content)
-        return local_file
-    else:
-        print(f"Graph API error: {response.status_code} - {response.text}")
-        return None
+    if response.status_code != 200:
+        return f"Failed to download Excel file: {response.text}", 400
+
+    with open("LessonTracker.xlsx", "wb") as f:
+        f.write(response.content)
+
+    workbook = openpyxl.load_workbook("LessonTracker.xlsx")
+    sheet = workbook["lesson log"]
+    lessons = [
+        [cell.value for cell in row]
+        for row in sheet.iter_rows(min_row=2, values_only=True)
+    ]
+    return render_template("lessons.html", lessons=lessons)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(
+        f"{AUTHORITY}/oauth2/v2.0/logout?post_logout_redirect_uri={url_for('index', _external=True)}"
+    )
+
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(debug=True)
